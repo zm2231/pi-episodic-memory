@@ -24,8 +24,11 @@ When you (or the LLM) ask "how did we solve X before?", it finds the relevant co
 ## Install
 
 ```bash
+# From npm
+pi install npm:pi-episodic-memory
+
 # From git
-pi install git:github.com/user/pi-episodic-memory
+pi install git:github.com/rHedBull/pi-episodic-memory
 
 # Local
 pi install /path/to/pi-episodic-memory

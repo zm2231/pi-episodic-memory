@@ -4,6 +4,15 @@
   "description": "Episodic memory for pi – semantic search over past sessions",
   "keywords": ["pi-package"],
   "type": "module",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/rHedBull/pi-episodic-memory"
+  },
+  "files": [
+    "extensions",
+    "skills",
+    "README.md"
+  ],
   "pi": {
     "extensions": ["./extensions"],
     "skills": ["./skills"]

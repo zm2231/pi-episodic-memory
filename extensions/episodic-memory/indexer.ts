@@ -139,6 +139,9 @@ export async function indexNewSessions(
 			// unindexed so the whole file is retried on the next session start.
 			// INSERT OR REPLACE in insertChunk makes re-indexing idempotent.
 			db.removeFile(file.path);
+			// Subtract rolled-back chunks from the global counter so the progress
+			// report reflects what is actually in the DB, not what was transiently inserted.
+			chunksIndexed -= fileChunksIndexed;
 			console.error(`Partial embed failure for ${file.path} — removed partial data, will retry`);
 		} else {
 			// All chunks succeeded — mark as fully indexed

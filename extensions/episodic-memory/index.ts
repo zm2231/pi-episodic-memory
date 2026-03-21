@@ -128,11 +128,7 @@ export default function (pi: ExtensionAPI) {
 					details: { resultCount: results.length },
 				};
 			} catch (err) {
-				return {
-					content: [{ type: "text", text: `Search failed: ${err}` }],
-					isError: true,
-					details: {},
-				};
+				throw new Error(`Search failed: ${err}`);
 			}
 		},
 	});
@@ -164,11 +160,7 @@ export default function (pi: ExtensionAPI) {
 				const { parseSessionFile } = await import("./parser.js");
 				const parsed = parseSessionFile(params.sessionFile);
 				if (!parsed) {
-					return {
-						content: [{ type: "text", text: "Could not parse session file." }],
-						isError: true,
-						details: {},
-					};
+					throw new Error("Could not parse session file.");
 				}
 
 				const maxMsgs = params.maxMessages || 30;
@@ -194,11 +186,7 @@ export default function (pi: ExtensionAPI) {
 					details: { totalMessages: parsed.messages.length, shown: messages.length },
 				};
 			} catch (err) {
-				return {
-					content: [{ type: "text", text: `Failed to show conversation: ${err}` }],
-					isError: true,
-					details: {},
-				};
+				throw new Error(`Failed to show conversation: ${err}`);
 			}
 		},
 	});

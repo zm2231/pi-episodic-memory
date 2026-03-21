@@ -16,8 +16,19 @@ export interface IndexProgress {
 	newChunks: number;
 }
 
+// Sessions are always stored in the global ~/.pi/agent/sessions/ regardless of
+// PI_CODING_AGENT_DIR — all pi instances share the same session store.
 const SESSIONS_DIR = path.join(os.homedir(), ".pi", "agent", "sessions");
-const DB_DIR = path.join(os.homedir(), ".pi", "agent", "episodic-memory");
+
+// DB is scoped to the active agent dir so each isolated pi environment keeps its
+// own index.
+// - Custom env (PI_CODING_AGENT_DIR set): <agentDir>/.pi/episodic-memory/index.db
+//   (.pi/ is gitignored in repo-based agent dirs like pi-ult)
+// - Default (~/.pi/agent): ~/.pi/agent/episodic-memory/index.db
+//   (preserves the original location for standard pi installs)
+const DB_DIR = process.env.PI_CODING_AGENT_DIR
+	? path.join(process.env.PI_CODING_AGENT_DIR, ".pi", "episodic-memory")
+	: path.join(os.homedir(), ".pi", "agent", "episodic-memory");
 export const DB_PATH = path.join(DB_DIR, "index.db");
 
 export { SESSIONS_DIR };

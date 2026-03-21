@@ -249,10 +249,13 @@ export class EpisodicMemoryDB {
 			filtered = filtered.filter((r: any) => projectMatches(r.project, project));
 		}
 		if (after) {
-			filtered = filtered.filter((r: any) => r.session_timestamp >= after);
+			// Compare date portion only: "2026-03-21T14:30:00Z".slice(0,10) >= "2026-03-21"
+			filtered = filtered.filter((r: any) => r.session_timestamp.slice(0, 10) >= after);
 		}
 		if (before) {
-			filtered = filtered.filter((r: any) => r.session_timestamp <= before);
+			// Full ISO timestamp always sorts after bare date ("2026-03-21T..." > "2026-03-21")
+			// so compare date portion only to include all times on the given day.
+			filtered = filtered.filter((r: any) => r.session_timestamp.slice(0, 10) <= before);
 		}
 		filtered = filtered.slice(0, limit);
 
@@ -294,11 +297,13 @@ export class EpisodicMemoryDB {
 			params.push(...projectValues);
 		}
 		if (after) {
-			sql += " AND session_timestamp >= ?";
+			sql += " AND date(session_timestamp) >= ?";
 			params.push(after);
 		}
 		if (before) {
-			sql += " AND session_timestamp <= ?";
+			// date() extracts the date portion from the ISO timestamp so "before"
+			// correctly includes all times on that day.
+			sql += " AND date(session_timestamp) <= ?";
 			params.push(before);
 		}
 

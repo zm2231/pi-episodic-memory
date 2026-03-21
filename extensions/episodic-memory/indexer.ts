@@ -78,7 +78,14 @@ export async function indexNewSessions(
 
 		// Parse the session file
 		const parsed = parseSessionFile(file.path);
-		if (!parsed || parsed.messages.length === 0) {
+		if (!parsed) {
+			// null means read error or corrupt JSONL — don't mark as indexed so it
+			// is retried next session (file may be mid-write or temporarily unreadable)
+			console.error(`Failed to parse session file, will retry: ${file.path}`);
+			continue;
+		}
+		if (parsed.messages.length === 0) {
+			// Genuinely empty session — safe to mark as indexed and skip
 			db.markFileIndexed(file.path, file.stat.mtimeMs, file.stat.size);
 			continue;
 		}

@@ -65,6 +65,11 @@ async function vectorSearch(
 /**
  * Multi-concept AND search: find chunks relevant to ALL concepts.
  * Runs vector search for each concept, then intersects results by chunk ID.
+ *
+ * Note: intersection is performed on the per-concept candidate pool, not the
+ * full corpus. Chunks that are moderately relevant to all concepts but not in
+ * the top-N for any single concept may be missed. The pool is intentionally
+ * large (limit * 20, min 200) to reduce this effect.
  */
 async function multiConceptSearch(
 	db: EpisodicMemoryDB,
@@ -74,8 +79,8 @@ async function multiConceptSearch(
 	after?: string,
 	before?: string,
 ): Promise<SearchResult[]> {
-	// Get results for each concept with a larger limit
-	const perConceptLimit = limit * 3;
+	// Large pool per concept to reduce intersection misses
+	const perConceptLimit = Math.max(limit * 20, 200);
 	const allResults = await Promise.all(
 		concepts.map((concept) => vectorSearch(db, concept, perConceptLimit, project, after, before)),
 	);

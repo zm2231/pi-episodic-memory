@@ -79,6 +79,8 @@ export async function indexNewSessions(
 		const chunks = chunkMessages(parsed.session, parsed.messages);
 
 		// Embed and store each chunk
+		let fileChunksIndexed = 0;
+		let fileEmbedError: unknown = null;
 		for (const chunk of chunks) {
 			try {
 				const embedding = await embed(chunk.text);
@@ -100,15 +102,23 @@ export async function indexNewSessions(
 				});
 
 				chunksIndexed++;
+				fileChunksIndexed++;
 			} catch (err) {
 				// Skip chunks that fail to embed, don't block the whole file
+				fileEmbedError = err;
 				console.error(`Failed to embed chunk ${chunk.chunkIndex} of ${file.path}:`, err);
 			}
 		}
 
-		// Mark file as indexed
-		db.markFileIndexed(file.path, file.stat.mtimeMs, file.stat.size);
-		filesIndexed++;
+		// Only mark as indexed if at least one chunk was embedded successfully.
+		// If all chunks failed (e.g. embedding backend unavailable), leave the file
+		// unindexed so it is retried on the next session start.
+		if (fileChunksIndexed > 0) {
+			db.markFileIndexed(file.path, file.stat.mtimeMs, file.stat.size);
+			filesIndexed++;
+		} else if (fileEmbedError) {
+			console.error(`Skipping markFileIndexed for ${file.path} — all chunks failed to embed`);
+		}
 	}
 
 	return { filesIndexed, chunksIndexed };

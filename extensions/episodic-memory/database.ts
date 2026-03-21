@@ -28,32 +28,38 @@ export interface SearchResult extends StoredChunk {
 }
 
 /**
- * Normalize a project identifier for matching.
+ * Normalize a project identifier for comparison.
  *
- * Session files are stored in directories like `--Volumes-4-GitHub-pi-ult--`.
- * The tool accepts short names like "pi-ult" or full paths like "Volumes/4/GitHub/pi-ult".
+ * Sessions are stored with project = raw directory name, e.g. "--Volumes-4-GitHub-pi-ult--".
+ * The encoding replaces "/" with "-", so path separators and hyphens in names are
+ * indistinguishable. Full path decoding is therefore not reliable.
  *
- * This returns a normalized suffix so we can match either form.
+ * We normalize by stripping leading/trailing "--", lowercasing, and treating the
+ * result as an opaque string for suffix matching.
  */
 function normalizeProjectName(name: string): string {
 	return name
 		.replace(/^--/, "")
 		.replace(/--$/, "")
-		.replace(/--/g, "/")
-		.replace(/\\/g, "/")
 		.toLowerCase();
 }
 
 /**
  * Returns true if the stored raw project value matches the user-supplied filter.
- * Handles short names ("pi-ult"), full decoded paths ("Volumes/4/GitHub/pi-ult"),
- * and raw encoded forms ("--Volumes-4-GitHub-pi-ult--").
+ *
+ * Supports short repo names only (e.g. "pi-ult").
+ * Full decoded paths (e.g. "Volumes/4/GitHub/pi-ult") are NOT supported because
+ * the encoding is lossy — "/" and "-" map to the same character.
+ *
+ * Examples:
+ *   projectMatches("--Volumes-4-GitHub-pi-ult--", "pi-ult")  → true
+ *   projectMatches("--Volumes-4-GitHub-pi-ult--", "pi-ult")  → true (exact suffix)
+ *   projectMatches("--Users-zain-zira--", "pi-ult")          → false
  */
 function projectMatches(storedRaw: string, filter: string): boolean {
 	const stored = normalizeProjectName(storedRaw);
 	const needle = normalizeProjectName(filter);
-	// Exact match or path-suffix match (e.g. "pi-ult" matches ".../pi-ult")
-	return stored === needle || stored.endsWith("/" + needle) || stored.endsWith("-" + needle);
+	return stored === needle || stored.endsWith("-" + needle);
 }
 
 export class EpisodicMemoryDB {

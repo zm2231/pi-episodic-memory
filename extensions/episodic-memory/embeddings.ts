@@ -30,6 +30,9 @@ if (REMOTE_URL) {
 			"Set EPISODIC_EMBED_DIM to the output dimension of your embedding model (e.g. 1024 for bge-large-en-v1.5).",
 		);
 	}
+	if (!/^\d+$/.test(_rawDim.trim())) {
+		throw new Error(`EPISODIC_EMBED_DIM must be a positive integer, got: ${JSON.stringify(_rawDim)}`);
+	}
 	const parsed = parseInt(_rawDim, 10);
 	if (!Number.isFinite(parsed) || parsed <= 0) {
 		throw new Error(`EPISODIC_EMBED_DIM must be a positive integer, got: ${JSON.stringify(_rawDim)}`);
@@ -99,7 +102,17 @@ async function getLocalEmbedder(): Promise<any> {
 	if (localLoadingPromise) return localLoadingPromise;
 
 	localLoadingPromise = (async () => {
-		const { pipeline: createPipeline } = await import("@huggingface/transformers");
+		let createPipeline: any;
+		try {
+			const mod = await import("@huggingface/transformers");
+			createPipeline = mod.pipeline;
+		} catch {
+			throw new Error(
+				"@huggingface/transformers is not installed. " +
+				"Either install it (`npm install @huggingface/transformers`) for local embedding mode, " +
+				"or set EPISODIC_EMBED_URL to use a remote embedding server instead.",
+			);
+		}
 		localPipeline = await createPipeline("feature-extraction", LOCAL_MODEL_NAME, { dtype: "fp32" });
 		return localPipeline;
 	})();

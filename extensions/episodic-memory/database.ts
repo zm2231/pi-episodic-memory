@@ -7,7 +7,7 @@ import * as fs from "node:fs";
 import * as path from "node:path";
 import Database from "better-sqlite3";
 import * as sqliteVec from "sqlite-vec";
-import { EMBEDDING_DIM } from "./embeddings.js";
+import { getEmbeddingDim } from "./embeddings.js";
 
 export interface StoredChunk {
 	id: number;
@@ -27,6 +27,35 @@ export interface SearchResult extends StoredChunk {
 	score: number; // 0-1, higher is better
 }
 
+/**
+ * Normalize a project identifier for matching.
+ *
+ * Session files are stored in directories like `--Volumes-4-GitHub-pi-ult--`.
+ * The tool accepts short names like "pi-ult" or full paths like "Volumes/4/GitHub/pi-ult".
+ *
+ * This returns a normalized suffix so we can match either form.
+ */
+function normalizeProjectName(name: string): string {
+	return name
+		.replace(/^--/, "")
+		.replace(/--$/, "")
+		.replace(/--/g, "/")
+		.replace(/\\/g, "/")
+		.toLowerCase();
+}
+
+/**
+ * Returns true if the stored raw project value matches the user-supplied filter.
+ * Handles short names ("pi-ult"), full decoded paths ("Volumes/4/GitHub/pi-ult"),
+ * and raw encoded forms ("--Volumes-4-GitHub-pi-ult--").
+ */
+function projectMatches(storedRaw: string, filter: string): boolean {
+	const stored = normalizeProjectName(storedRaw);
+	const needle = normalizeProjectName(filter);
+	// Exact match or path-suffix match (e.g. "pi-ult" matches ".../pi-ult")
+	return stored === needle || stored.endsWith("/" + needle) || stored.endsWith("-" + needle);
+}
+
 export class EpisodicMemoryDB {
 	private db: Database.Database;
 
@@ -41,6 +70,23 @@ export class EpisodicMemoryDB {
 		this.db.pragma("journal_mode = WAL");
 		sqliteVec.load(this.db);
 		this.init();
+	}
+
+	/**
+	 * Read the embedding dimension from the existing vec0 table, or null if not yet created.
+	 */
+	private getExistingVecDim(): number | null {
+		try {
+			// sqlite-vec stores schema in sqlite_master; the CREATE statement has float[N]
+			const row = this.db
+				.prepare("SELECT sql FROM sqlite_master WHERE type='table' AND name='chunks_vec'")
+				.get() as { sql: string } | undefined;
+			if (!row) return null;
+			const match = row.sql.match(/float\[(\d+)\]/);
+			return match ? parseInt(match[1], 10) : null;
+		} catch {
+			return null;
+		}
 	}
 
 	private init() {
@@ -71,24 +117,28 @@ export class EpisodicMemoryDB {
 			)
 		`);
 
-		// Virtual table for vector search
+		// Virtual table for vector search — dimension is dynamic based on embedding backend.
+		// If the table already exists with a different dimension, we detect and throw early
+		// rather than silently inserting incompatible vectors.
+		const dim = getEmbeddingDim();
+		const existingDim = this.getExistingVecDim();
+		if (existingDim !== null && existingDim !== dim) {
+			throw new Error(
+				`Embedding dimension mismatch: DB has ${existingDim}d but current backend produces ${dim}d. ` +
+				`Run /memory-reindex to rebuild the index with the new dimensions.`,
+			);
+		}
 		this.db.exec(`
 			CREATE VIRTUAL TABLE IF NOT EXISTS chunks_vec USING vec0(
 				chunk_id INTEGER PRIMARY KEY,
-				embedding float[${EMBEDDING_DIM}]
+				embedding float[${dim}]
 			)
 		`);
 
-		// Index for text search
-		this.db.exec(`
-			CREATE INDEX IF NOT EXISTS idx_chunks_text ON chunks(text)
-		`);
-		this.db.exec(`
-			CREATE INDEX IF NOT EXISTS idx_chunks_project ON chunks(project)
-		`);
-		this.db.exec(`
-			CREATE INDEX IF NOT EXISTS idx_chunks_session_timestamp ON chunks(session_timestamp)
-		`);
+		// Indexes for filtering
+		this.db.exec(`CREATE INDEX IF NOT EXISTS idx_chunks_text ON chunks(text)`);
+		this.db.exec(`CREATE INDEX IF NOT EXISTS idx_chunks_project ON chunks(project)`);
+		this.db.exec(`CREATE INDEX IF NOT EXISTS idx_chunks_session_timestamp ON chunks(session_timestamp)`);
 	}
 
 	/**
@@ -140,7 +190,6 @@ export class EpisodicMemoryDB {
 
 		const chunkId = Number(result.lastInsertRowid);
 
-		// Insert embedding — sqlite-vec requires CAST for parameterized integer PKs
 		this.db.prepare("INSERT INTO chunks_vec (chunk_id, embedding) VALUES (CAST(? AS INTEGER), ?)").run(chunkId, embedding);
 
 		return chunkId;
@@ -167,10 +216,17 @@ export class EpisodicMemoryDB {
 
 	/**
 	 * Semantic vector search.
+	 *
+	 * Project filter uses normalized suffix matching so short names like "pi-ult"
+	 * correctly match stored values like "--Volumes-4-GitHub-pi-ult--".
+	 *
+	 * Fetches a larger candidate pool when project/date filters are active to avoid
+	 * returning too few results after post-filtering.
 	 */
 	vectorSearch(embedding: Buffer, limit: number, project?: string, after?: string, before?: string): SearchResult[] {
-		// sqlite-vec requires k=? for knn queries; we fetch more if filtering, then trim
-		const fetchLimit = (project || after || before) ? limit * 5 : limit;
+		const hasFilter = !!(project || after || before);
+		// Fetch a generous pool when filtering — project filters can be very selective
+		const fetchLimit = hasFilter ? Math.max(limit * 20, 100) : limit;
 
 		const rows = this.db
 			.prepare(
@@ -182,10 +238,9 @@ export class EpisodicMemoryDB {
 			)
 			.all(embedding, fetchLimit) as any[];
 
-		// Apply post-filters
 		let filtered = rows;
 		if (project) {
-			filtered = filtered.filter((r: any) => r.project === project);
+			filtered = filtered.filter((r: any) => projectMatches(r.project, project));
 		}
 		if (after) {
 			filtered = filtered.filter((r: any) => r.session_timestamp >= after);
@@ -207,20 +262,30 @@ export class EpisodicMemoryDB {
 			endTime: row.end_time,
 			sessionTimestamp: row.session_timestamp,
 			distance: row.distance,
-			score: 1 / (1 + row.distance), // convert distance to 0-1 score
+			score: 1 / (1 + row.distance),
 		}));
 	}
 
 	/**
-	 * Full-text search using LIKE (simple but effective).
+	 * Full-text search using LIKE with normalized project matching.
 	 */
 	textSearch(query: string, limit: number, project?: string, after?: string, before?: string): SearchResult[] {
+		// If project filter given, collect matching raw project values first
+		let projectValues: string[] | null = null;
+		if (project) {
+			const allProjects = (
+				this.db.prepare("SELECT DISTINCT project FROM chunks").all() as { project: string }[]
+			).map((r) => r.project);
+			projectValues = allProjects.filter((p) => projectMatches(p, project));
+		}
+
 		let sql = "SELECT * FROM chunks WHERE text LIKE ?";
 		const params: any[] = [`%${query}%`];
 
-		if (project) {
-			sql += " AND project = ?";
-			params.push(project);
+		if (projectValues !== null) {
+			if (projectValues.length === 0) return []; // no matching projects
+			sql += ` AND project IN (${projectValues.map(() => "?").join(",")})`;
+			params.push(...projectValues);
 		}
 		if (after) {
 			sql += " AND session_timestamp >= ?";
@@ -271,12 +336,8 @@ export class EpisodicMemoryDB {
 		const projects = (this.db.prepare("SELECT DISTINCT project FROM chunks ORDER BY project").all() as any[]).map(
 			(r) => r.project,
 		);
-		const oldest = this.db
-			.prepare("SELECT MIN(session_timestamp) as ts FROM chunks")
-			.get() as any;
-		const newest = this.db
-			.prepare("SELECT MAX(session_timestamp) as ts FROM chunks")
-			.get() as any;
+		const oldest = this.db.prepare("SELECT MIN(session_timestamp) as ts FROM chunks").get() as any;
+		const newest = this.db.prepare("SELECT MAX(session_timestamp) as ts FROM chunks").get() as any;
 
 		return {
 			totalChunks,

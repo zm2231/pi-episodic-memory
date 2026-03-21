@@ -1,56 +1,153 @@
 /**
- * Local embeddings using Transformers.js.
- * Downloads the model on first use (~23MB), then runs locally.
+ * Embeddings — local (Transformers.js) or remote (OpenAI-compatible HTTP endpoint).
+ *
+ * Remote mode is preferred when EPISODIC_EMBED_URL is set.
+ * Falls back to local all-MiniLM-L6-v2 (384d) otherwise.
+ *
+ * Environment variables:
+ *   EPISODIC_EMBED_URL    Base URL of OpenAI-compatible embeddings server
+ *                         e.g. http://100.122.112.83:8100
+ *   EPISODIC_EMBED_MODEL  Model name to request (default: bge-large-en-v1.5)
+ *   EPISODIC_EMBED_DIM    Expected output dimension (default: auto-detected)
  */
 
-let pipeline: any = null;
-let loadingPromise: Promise<any> | null = null;
+// ─── Local fallback config ────────────────────────────────────────────────────
+const LOCAL_MODEL_NAME = "Xenova/all-MiniLM-L6-v2";
+const LOCAL_EMBEDDING_DIM = 384;
 
-const MODEL_NAME = "Xenova/all-MiniLM-L6-v2";
-const EMBEDDING_DIM = 384;
+// ─── Remote config (from env) ─────────────────────────────────────────────────
+const REMOTE_URL   = process.env.EPISODIC_EMBED_URL?.replace(/\/$/, "") ?? null;
+const REMOTE_MODEL = process.env.EPISODIC_EMBED_MODEL ?? "bge-large-en-v1.5";
 
-export { EMBEDDING_DIM };
+// EPISODIC_EMBED_DIM is required when using remote mode.
+// We cannot probe the backend before DB schema creation, so the dim must be explicit.
+const _rawDim = process.env.EPISODIC_EMBED_DIM;
+let REMOTE_DIM: number | null = null;
+if (REMOTE_URL) {
+	if (!_rawDim) {
+		throw new Error(
+			"EPISODIC_EMBED_URL is set but EPISODIC_EMBED_DIM is missing. " +
+			"Set EPISODIC_EMBED_DIM to the output dimension of your embedding model (e.g. 1024 for bge-large-en-v1.5).",
+		);
+	}
+	const parsed = parseInt(_rawDim, 10);
+	if (!Number.isFinite(parsed) || parsed <= 0) {
+		throw new Error(`EPISODIC_EMBED_DIM must be a positive integer, got: ${JSON.stringify(_rawDim)}`);
+	}
+	REMOTE_DIM = parsed;
+}
 
-/**
- * Initialize the embedding pipeline. Cached after first call.
- */
-async function getEmbedder(): Promise<any> {
-	if (pipeline) return pipeline;
-	if (loadingPromise) return loadingPromise;
+/** Resolved embedding dimension — known at startup */
+export function getEmbeddingDim(): number {
+	return REMOTE_DIM ?? LOCAL_EMBEDDING_DIM;
+}
 
-	loadingPromise = (async () => {
-		const { pipeline: createPipeline } = await import("@huggingface/transformers");
-		pipeline = await createPipeline("feature-extraction", MODEL_NAME, {
-			dtype: "fp32",
+// ─── Remote embedding ─────────────────────────────────────────────────────────
+
+async function embedRemote(texts: string[]): Promise<Float32Array[]> {
+	const url = `${REMOTE_URL}/v1/embeddings`;
+	const body = JSON.stringify({ model: REMOTE_MODEL, input: texts });
+
+	const controller = new AbortController();
+	const timeout = setTimeout(() => controller.abort(), 30_000);
+	let res: Response;
+	try {
+		res = await fetch(url, {
+			method: "POST",
+			headers: { "Content-Type": "application/json" },
+			body,
+			signal: controller.signal,
 		});
-		return pipeline;
+	} finally {
+		clearTimeout(timeout);
+	}
+
+	if (!res.ok) {
+		throw new Error(`Remote embedding failed: ${res.status} ${await res.text()}`);
+	}
+
+	const json = (await res.json()) as { data: { embedding: number[]; index: number }[] };
+
+	if (!Array.isArray(json.data) || json.data.length !== texts.length) {
+		throw new Error(
+			`Remote embedding response has ${json.data?.length ?? "?"} items but ${texts.length} were requested.`,
+		);
+	}
+
+	// Sort by index to ensure correct order and validate completeness
+	const sorted = json.data.sort((a, b) => a.index - b.index);
+	const expectedDim = REMOTE_DIM!;
+	const results = sorted.map((d, i) => {
+		if (!Array.isArray(d.embedding) || d.embedding.length !== expectedDim) {
+			throw new Error(
+				`Remote embedding item ${i} has dim ${d.embedding?.length ?? "?"}, expected ${expectedDim}.`,
+			);
+		}
+		return new Float32Array(d.embedding);
+	});
+
+	return results;
+}
+
+// ─── Local embedding ──────────────────────────────────────────────────────────
+
+let localPipeline: any = null;
+let localLoadingPromise: Promise<any> | null = null;
+
+async function getLocalEmbedder(): Promise<any> {
+	if (localPipeline) return localPipeline;
+	if (localLoadingPromise) return localLoadingPromise;
+
+	localLoadingPromise = (async () => {
+		const { pipeline: createPipeline } = await import("@huggingface/transformers");
+		localPipeline = await createPipeline("feature-extraction", LOCAL_MODEL_NAME, { dtype: "fp32" });
+		return localPipeline;
 	})();
 
-	return loadingPromise;
+	return localLoadingPromise;
 }
+
+async function embedLocal(texts: string[]): Promise<Float32Array[]> {
+	const embedder = await getLocalEmbedder();
+	const results: Float32Array[] = [];
+	for (const text of texts) {
+		const truncated = text.length > 2000 ? text.slice(0, 2000) : text;
+		const result = await embedder(truncated, { pooling: "mean", normalize: true });
+		results.push(new Float32Array(result.data));
+	}
+	return results;
+}
+
+// ─── Public API ───────────────────────────────────────────────────────────────
 
 /**
  * Generate an embedding for a single text.
- * Returns a Float32Array of dimension 384.
  */
 export async function embed(text: string): Promise<Float32Array> {
-	const embedder = await getEmbedder();
-	// Truncate long text to avoid OOM — model max is 256 tokens, ~1000 chars is safe
 	const truncated = text.length > 2000 ? text.slice(0, 2000) : text;
-	const result = await embedder(truncated, { pooling: "mean", normalize: true });
-	return new Float32Array(result.data);
+	const results = REMOTE_URL
+		? await embedRemote([truncated])
+		: await embedLocal([truncated]);
+	return results[0];
 }
 
 /**
  * Generate embeddings for multiple texts in batch.
+ * Remote mode sends all in one HTTP request; local mode processes sequentially.
  */
 export async function embedBatch(texts: string[]): Promise<Float32Array[]> {
-	const results: Float32Array[] = [];
-	// Process sequentially to avoid OOM with large batches
-	for (const text of texts) {
-		results.push(await embed(text));
+	if (REMOTE_URL) {
+		// Batch in chunks of 64 to avoid request size limits
+		const CHUNK = 64;
+		const results: Float32Array[] = [];
+		for (let i = 0; i < texts.length; i += CHUNK) {
+			const chunk = texts.slice(i, i + CHUNK).map((t) => (t.length > 2000 ? t.slice(0, 2000) : t));
+			const batch = await embedRemote(chunk);
+			results.push(...batch);
+		}
+		return results;
 	}
-	return results;
+	return embedLocal(texts);
 }
 
 /**
@@ -69,3 +166,5 @@ export function deserializeEmbedding(buffer: Buffer): Float32Array {
 	for (let i = 0; i < buffer.length; i++) view[i] = buffer[i];
 	return new Float32Array(ab);
 }
+
+export { REMOTE_URL, REMOTE_MODEL };

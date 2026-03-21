@@ -91,7 +91,11 @@ export default function (pi: ExtensionAPI) {
 			),
 			project: Type.Optional(
 				Type.String({
-					description: "Filter to a specific project directory name.",
+					description:
+						"Filter to a specific project by short repo name (e.g. 'pi-ult'). " +
+						"Matches any stored project ending in that name. " +
+						"Note: full decoded paths (e.g. 'Volumes/4/GitHub/pi-ult') are not supported — " +
+						"use the short repo name only.",
 				}),
 			),
 			after: Type.Optional(

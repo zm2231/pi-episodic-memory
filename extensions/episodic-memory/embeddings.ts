@@ -165,7 +165,8 @@ export async function embedBatch(texts: string[]): Promise<Float32Array[]> {
 		}
 		return results;
 	}
-	return embedLocal(texts);
+	const truncated = texts.map((t) => (t.length > 2000 ? t.slice(0, 2000) : t));
+	return embedLocal(truncated);
 }
 
 /**

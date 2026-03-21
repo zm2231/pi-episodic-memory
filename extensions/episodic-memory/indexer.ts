@@ -79,19 +79,28 @@ export async function indexNewSessions(
 		// Parse the session file
 		const parsed = parseSessionFile(file.path);
 		if (!parsed) {
-			if (file.stat.size === 0) {
-				// Truly empty file — mark as indexed so it isn't retried every session.
-				// An empty .jsonl has no content worth indexing and won't grow.
-				db.markFileIndexed(file.path, file.stat.mtimeMs, file.stat.size);
-			} else {
-				// Non-empty but unparseable — could be mid-write or corrupt.
-				// Don't mark as indexed; retry next session.
-				console.error(`Failed to parse session file, will retry: ${file.path}`);
-			}
+			// null means read error — file may be mid-open or temporarily locked.
+			// Don't mark as indexed; retry next session.
+			console.error(`Failed to read session file, will retry: ${file.path}`);
 			continue;
 		}
+
+		if (parsed.skippedLines > 0) {
+			console.warn(`${file.path}: skipped ${parsed.skippedLines} malformed line(s), indexing partial session`);
+		}
+
+		if (!parsed.session) {
+			// File was readable but had no session header — no way to attribute chunks.
+			// Mark as indexed so we don't retry a permanently headerless file forever.
+			if (parsed.skippedLines > 0) {
+				console.warn(`${file.path}: no session header found, skipping`);
+			}
+			db.markFileIndexed(file.path, file.stat.mtimeMs, file.stat.size);
+			continue;
+		}
+
 		if (parsed.messages.length === 0) {
-			// Valid session record but no messages — safe to mark as indexed and skip
+			// Valid session record but no messages — mark indexed and skip
 			db.markFileIndexed(file.path, file.stat.mtimeMs, file.stat.size);
 			continue;
 		}

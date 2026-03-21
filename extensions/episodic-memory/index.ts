@@ -159,7 +159,7 @@ export default function (pi: ExtensionAPI) {
 			try {
 				const { parseSessionFile } = await import("./parser.js");
 				const parsed = parseSessionFile(params.sessionFile);
-				if (!parsed) {
+				if (!parsed || !parsed.session) {
 					throw new Error("Could not parse session file.");
 				}
 

@@ -58,25 +58,42 @@ function extractText(content: Array<{ type: string; text?: string; thinking?: st
 /**
  * Parse a session JSONL file into metadata and messages.
  */
-export function parseSessionFile(filePath: string): { session: SessionMeta; messages: MessageEntry[] } | null {
+export type ParsedSession = {
+	session: SessionMeta | null; // null when no session header was found
+	messages: MessageEntry[];
+	skippedLines: number;
+};
+
+/**
+ * Returns null only on read error (file unreadable / mid-open).
+ * Returns ParsedSession with session=null when the file is readable but
+ * has no session header — caller decides whether to retry or mark indexed.
+ */
+export function parseSessionFile(filePath: string): ParsedSession | null {
 	let raw: string;
 	try {
 		raw = fs.readFileSync(filePath, "utf-8");
 	} catch {
-		return null;
+		return null; // unreadable — caller should retry
 	}
 
 	const lines = raw.split("\n").filter((l) => l.trim());
-	if (lines.length === 0) return null;
+	if (lines.length === 0) {
+		// No parseable content (empty or whitespace-only) — return empty session
+		// so caller can mark indexed rather than retrying forever
+		return { session: null, messages: [], skippedLines: 0 };
+	}
 
 	let session: SessionMeta | null = null;
 	const messages: MessageEntry[] = [];
+	let skippedLines = 0;
 
 	for (const line of lines) {
 		let entry: RawEntry;
 		try {
 			entry = JSON.parse(line);
 		} catch {
+			skippedLines++;
 			continue;
 		}
 
@@ -109,8 +126,8 @@ export function parseSessionFile(filePath: string): { session: SessionMeta; mess
 		}
 	}
 
-	if (!session) return null;
-	return { session, messages };
+	// Always return what we parsed — session may be null if no header found
+	return { session, messages, skippedLines };
 }
 
 /**

@@ -53,23 +53,22 @@ async function embedRemote(texts: string[]): Promise<Float32Array[]> {
 
 	const controller = new AbortController();
 	const timeout = setTimeout(() => controller.abort(), 30_000);
-	let res: Response;
+	// Keep timeout active through body reads — server could stall mid-body
+	let json: { data: { embedding: number[]; index: number }[] };
 	try {
-		res = await fetch(url, {
+		const res = await fetch(url, {
 			method: "POST",
 			headers: { "Content-Type": "application/json" },
 			body,
 			signal: controller.signal,
 		});
+		if (!res.ok) {
+			throw new Error(`Remote embedding failed: ${res.status} ${await res.text()}`);
+		}
+		json = (await res.json()) as { data: { embedding: number[]; index: number }[] };
 	} finally {
 		clearTimeout(timeout);
 	}
-
-	if (!res.ok) {
-		throw new Error(`Remote embedding failed: ${res.status} ${await res.text()}`);
-	}
-
-	const json = (await res.json()) as { data: { embedding: number[]; index: number }[] };
 
 	if (!Array.isArray(json.data) || json.data.length !== texts.length) {
 		throw new Error(
@@ -81,6 +80,11 @@ async function embedRemote(texts: string[]): Promise<Float32Array[]> {
 	const sorted = json.data.sort((a, b) => a.index - b.index);
 	const expectedDim = REMOTE_DIM!;
 	const results = sorted.map((d, i) => {
+		if (d.index !== i) {
+			throw new Error(
+				`Remote embedding response has missing or duplicate index: expected ${i}, got ${d.index}.`,
+			);
+		}
 		if (!Array.isArray(d.embedding) || d.embedding.length !== expectedDim) {
 			throw new Error(
 				`Remote embedding item ${i} has dim ${d.embedding?.length ?? "?"}, expected ${expectedDim}.`,
@@ -124,8 +128,8 @@ async function embedLocal(texts: string[]): Promise<Float32Array[]> {
 	const embedder = await getLocalEmbedder();
 	const results: Float32Array[] = [];
 	for (const text of texts) {
-		const truncated = text.length > 2000 ? text.slice(0, 2000) : text;
-		const result = await embedder(truncated, { pooling: "mean", normalize: true });
+		// Texts are already truncated by callers — no truncation here
+		const result = await embedder(text, { pooling: "mean", normalize: true });
 		results.push(new Float32Array(result.data));
 	}
 	return results;
@@ -146,7 +150,8 @@ export async function embed(text: string): Promise<Float32Array> {
 
 /**
  * Generate embeddings for multiple texts in batch.
- * Remote mode sends all in one HTTP request; local mode processes sequentially.
+ * Remote mode sends requests in chunks of 64 to avoid request size limits.
+ * Local mode processes sequentially.
  */
 export async function embedBatch(texts: string[]): Promise<Float32Array[]> {
 	if (REMOTE_URL) {

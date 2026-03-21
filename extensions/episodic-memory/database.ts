@@ -39,8 +39,8 @@ export interface SearchResult extends StoredChunk {
  */
 function normalizeProjectName(name: string): string {
 	return name
-		.replace(/^--/, "")
-		.replace(/--$/, "")
+		.replace(/^-+/, "")
+		.replace(/-+$/, "")
 		.toLowerCase();
 }
 
@@ -73,9 +73,14 @@ export class EpisodicMemoryDB {
 		}
 
 		this.db = new Database(dbPath);
-		this.db.pragma("journal_mode = WAL");
-		sqliteVec.load(this.db);
-		this.init();
+		try {
+			this.db.pragma("journal_mode = WAL");
+			sqliteVec.load(this.db);
+			this.init();
+		} catch (err) {
+			this.db.close();
+			throw err;
+		}
 	}
 
 	/**
@@ -231,32 +236,46 @@ export class EpisodicMemoryDB {
 	 */
 	vectorSearch(embedding: Buffer, limit: number, project?: string, after?: string, before?: string): SearchResult[] {
 		const hasFilter = !!(project || after || before);
-		// Fetch a generous pool when filtering — project filters can be very selective
-		const fetchLimit = hasFilter ? Math.max(limit * 20, 100) : limit;
+		const stmt = this.db.prepare(
+			`SELECT c.*, v.distance
+			FROM chunks_vec v
+			JOIN chunks c ON c.id = v.chunk_id
+			WHERE v.embedding MATCH ? AND k = ?
+			ORDER BY v.distance`,
+		);
 
-		const rows = this.db
-			.prepare(
-				`SELECT c.*, v.distance
-				FROM chunks_vec v
-				JOIN chunks c ON c.id = v.chunk_id
-				WHERE v.embedding MATCH ? AND k = ?
-				ORDER BY v.distance`,
-			)
-			.all(embedding, fetchLimit) as any[];
+		// When filters are active, expand k iteratively until we have enough results
+		// or the vector index is exhausted (no new rows returned).
+		let filtered: any[] = [];
+		let k = hasFilter ? Math.max(limit * 20, 100) : limit;
+		let prevTotal = -1;
 
-		let filtered = rows;
-		if (project) {
-			filtered = filtered.filter((r: any) => projectMatches(r.project, project));
+		while (filtered.length < limit) {
+			const rows = stmt.all(embedding, k) as any[];
+
+			// Exhausted — no new rows even with larger k
+			if (rows.length === prevTotal) break;
+			prevTotal = rows.length;
+
+			let candidates = rows;
+			if (project) {
+				candidates = candidates.filter((r: any) => projectMatches(r.project, project));
+			}
+			if (after) {
+				candidates = candidates.filter((r: any) => r.session_timestamp && r.session_timestamp.slice(0, 10) >= after);
+			}
+			if (before) {
+				candidates = candidates.filter((r: any) => r.session_timestamp && r.session_timestamp.slice(0, 10) <= before);
+			}
+			filtered = candidates;
+
+			// If we got all available rows, stop expanding
+			if (rows.length < k) break;
+
+			// Expand k for next iteration
+			k = k * 2;
 		}
-		if (after) {
-			// Compare date portion only: "2026-03-21T14:30:00Z".slice(0,10) >= "2026-03-21"
-			filtered = filtered.filter((r: any) => r.session_timestamp.slice(0, 10) >= after);
-		}
-		if (before) {
-			// Full ISO timestamp always sorts after bare date ("2026-03-21T..." > "2026-03-21")
-			// so compare date portion only to include all times on the given day.
-			filtered = filtered.filter((r: any) => r.session_timestamp.slice(0, 10) <= before);
-		}
+
 		filtered = filtered.slice(0, limit);
 
 		return filtered.map((row: any) => ({
@@ -297,12 +316,14 @@ export class EpisodicMemoryDB {
 			params.push(...projectValues);
 		}
 		if (after) {
+			// date("") returns NULL in SQLite, so rows with empty timestamps are
+			// excluded by the NULL comparison — correct behaviour.
 			sql += " AND date(session_timestamp) >= ?";
 			params.push(after);
 		}
 		if (before) {
-			// date() extracts the date portion from the ISO timestamp so "before"
-			// correctly includes all times on that day.
+			// date() extracts the date portion from ISO timestamp, inclusive of the day.
+			// Rows with empty session_timestamp produce NULL and are excluded.
 			sql += " AND date(session_timestamp) <= ?";
 			params.push(before);
 		}

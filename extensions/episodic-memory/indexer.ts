@@ -96,58 +96,55 @@ export async function indexNewSessions(
 			continue;
 		}
 
-		// Remove old data if reindexing
-		db.removeFile(file.path);
-
 		// Chunk the messages
 		const chunks = chunkMessages(parsed.session, parsed.messages);
 
-		// Embed and store each chunk
-		let fileChunksIndexed = 0;
-		let fileEmbedError: unknown = null;
+		// Phase 1: embed all chunks into memory first.
+		// Do NOT touch the DB yet — if any embed fails, the existing index is preserved.
+		type EmbeddedChunk = { chunk: (typeof chunks)[number]; embeddingBuf: Buffer };
+		const embedded: EmbeddedChunk[] = [];
+		let embedError: unknown = null;
+
 		for (const chunk of chunks) {
 			try {
 				const embedding = await embed(chunk.text);
-				const embeddingBuf = serializeEmbedding(embedding);
-
-				db.transaction(() => {
-					db.insertChunk(
-						chunk.session.id,
-						chunk.session.filePath,
-						chunk.session.project,
-						chunk.session.cwd,
-						chunk.chunkIndex,
-						chunk.text,
-						chunk.startTime,
-						chunk.endTime,
-						chunk.session.timestamp,
-						embeddingBuf,
-					);
-				});
-
-				chunksIndexed++;
-				fileChunksIndexed++;
+				embedded.push({ chunk, embeddingBuf: serializeEmbedding(embedding) });
 			} catch (err) {
-				// Skip chunks that fail to embed, don't block the whole file
-				fileEmbedError = err;
+				embedError = err;
 				console.error(`Failed to embed chunk ${chunk.chunkIndex} of ${file.path}:`, err);
+				break; // abort remaining chunks — whole file will retry
 			}
 		}
 
-		if (fileEmbedError) {
-			// One or more chunks failed — remove any partial data and leave the file
-			// unindexed so the whole file is retried on the next session start.
-			// INSERT OR REPLACE in insertChunk makes re-indexing idempotent.
-			db.removeFile(file.path);
-			// Subtract rolled-back chunks from the global counter so the progress
-			// report reflects what is actually in the DB, not what was transiently inserted.
-			chunksIndexed -= fileChunksIndexed;
-			console.error(`Partial embed failure for ${file.path} — removed partial data, will retry`);
-		} else {
-			// All chunks succeeded — mark as fully indexed
-			db.markFileIndexed(file.path, file.stat.mtimeMs, file.stat.size);
-			filesIndexed++;
+		if (embedError) {
+			// Embedding failed — leave existing DB data intact so previously indexed
+			// content remains searchable. File will be retried on next session start.
+			console.error(`Skipping DB write for ${file.path} — existing index preserved, will retry`);
+			continue;
 		}
+
+		// Phase 2: all embeddings succeeded — atomically replace old data and insert new.
+		db.transaction(() => {
+			db.removeFile(file.path);
+			for (const { chunk, embeddingBuf } of embedded) {
+				db.insertChunk(
+					chunk.session.id,
+					chunk.session.filePath,
+					chunk.session.project,
+					chunk.session.cwd,
+					chunk.chunkIndex,
+					chunk.text,
+					chunk.startTime,
+					chunk.endTime,
+					chunk.session.timestamp,
+					embeddingBuf,
+				);
+			}
+			db.markFileIndexed(file.path, file.stat.mtimeMs, file.stat.size);
+		});
+
+		chunksIndexed += embedded.length;
+		filesIndexed++;
 	}
 
 	return { filesIndexed, chunksIndexed };

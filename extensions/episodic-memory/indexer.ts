@@ -134,14 +134,16 @@ export async function indexNewSessions(
 			}
 		}
 
-		// Only mark as indexed if at least one chunk was embedded successfully.
-		// If all chunks failed (e.g. embedding backend unavailable), leave the file
-		// unindexed so it is retried on the next session start.
-		if (fileChunksIndexed > 0) {
+		if (fileEmbedError) {
+			// One or more chunks failed — remove any partial data and leave the file
+			// unindexed so the whole file is retried on the next session start.
+			// INSERT OR REPLACE in insertChunk makes re-indexing idempotent.
+			db.removeFile(file.path);
+			console.error(`Partial embed failure for ${file.path} — removed partial data, will retry`);
+		} else {
+			// All chunks succeeded — mark as fully indexed
 			db.markFileIndexed(file.path, file.stat.mtimeMs, file.stat.size);
 			filesIndexed++;
-		} else if (fileEmbedError) {
-			console.error(`Skipping markFileIndexed for ${file.path} — all chunks failed to embed`);
 		}
 	}
 
